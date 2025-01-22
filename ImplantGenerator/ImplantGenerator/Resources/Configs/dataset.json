@@ -1,0 +1,11 @@
+{
+  "channel_names": {
+    "0": "images"
+  }, 
+  "labels": {
+    "background": 0,
+    "cylinder": 1
+  }, 
+  "numTraining": 1570, 
+  "file_ending": ".nii.gz"
+}
