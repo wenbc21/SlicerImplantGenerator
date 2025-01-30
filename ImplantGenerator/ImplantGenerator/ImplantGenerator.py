@@ -31,11 +31,18 @@ import SimpleITK as sitk
 
 import numpy as np
 try:
+  import cv2
+except ModuleNotFoundError:
+  if slicer.util.confirmOkCancelDisplay("This module requires 'opencv' Python package. Click OK to install it now."):
+    slicer.util.pip_install("opencv-python")
+    import cv2
+try:
   import torch
 except ModuleNotFoundError:
   if slicer.util.confirmOkCancelDisplay("This module requires 'torch' Python package. Click OK to install it now."):
-    slicer.util.pip_install("torch>=2.1.2")
+    slicer.util.pip_install("torch==2.4.0")
     import torch
+# torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
 try:
   from acvl_utils.cropping_and_padding.padding import pad_nd_image
 except ModuleNotFoundError:
@@ -66,6 +73,12 @@ except ModuleNotFoundError:
   if slicer.util.confirmOkCancelDisplay("This module requires 'tqdm' Python package. Click OK to install it now."):
     slicer.util.pip_install("tqdm")
     from tqdm import tqdm
+try:
+  from skimage.transform import rescale
+except ModuleNotFoundError:
+  if slicer.util.confirmOkCancelDisplay("This module requires 'skimage' Python package. Click OK to install it now."):
+    slicer.util.pip_install("scikit-image")
+    from skimage.transform import rescale
 
 import sys
 import os
@@ -120,12 +133,12 @@ class nnUNetPredictor(object):
         self.device = device
         self.perform_everything_on_device = perform_everything_on_device
 
-    def initialize_from_trained_model_folder(self, checkpoint_name: str = 'checkpoint_final.pth'):
+    def initialize_from_trained_model_folder(self, mode, checkpoint_name):
         """
         This is used when making predictions with a trained model
         """
-        dataset_json = load_json(join(resources_path, "Resources", "Configs", 'dataset.json'))
-        plans = load_json(join(resources_path, "Resources", "Configs", 'plans.json'))
+        dataset_json = load_json(join(resources_path, "Resources", "Configs", mode, 'dataset.json'))
+        plans = load_json(join(resources_path, "Resources", "Configs", mode, 'plans.json'))
         plans_manager = PlansManager(plans)
 
         checkpoint = torch.load(join(resources_path, "Resources", "Weights", checkpoint_name),
@@ -839,63 +852,12 @@ class nnUNetPredictor(object):
         """
         Just like predict_from_files but doesn't use any multiprocessing. Slow, but sometimes necessary
         """
-        # if isinstance(output_folder_or_list_of_truncated_output_files, str):
-        #     output_folder = output_folder_or_list_of_truncated_output_files
-        # elif isinstance(output_folder_or_list_of_truncated_output_files, list):
-        #     output_folder = os.path.dirname(output_folder_or_list_of_truncated_output_files[0])
-        # else:
-        #     output_folder = None
-
-        # ########################
-        # # let's store the input arguments so that its clear what was used to generate the prediction
-        # if output_folder is not None:
-        #     my_init_kwargs = {}
-        #     for k in inspect.signature(self.predict_from_files_sequential).parameters.keys():
-        #         my_init_kwargs[k] = locals()[k]
-        #     my_init_kwargs = deepcopy(
-        #         my_init_kwargs)  # let's not unintentionally change anything in-place. Take this as a
-        #     recursive_fix_for_json_export(my_init_kwargs)
-        #     maybe_mkdir_p(output_folder)
-        #     save_json(my_init_kwargs, join(output_folder, 'predict_from_raw_data_args.json'))
-
-        #     # we need these two if we want to do things with the predictions like for example apply postprocessing
-        #     save_json(self.dataset_json, join(output_folder, 'dataset.json'), sort_keys=False)
-        #     save_json(self.plans_manager.plans, join(output_folder, 'plans.json'), sort_keys=False)
-        # #######################
-
-        # # check if we need a prediction from the previous stage
-        # if self.configuration_manager.previous_stage_name is not None:
-        #     assert folder_with_segs_from_prev_stage is not None, \
-        #         f'The requested configuration is a cascaded network. It requires the segmentations of the previous ' \
-        #         f'stage ({self.configuration_manager.previous_stage_name}) as input. Please provide the folder where' \
-        #         f' they are located via folder_with_segs_from_prev_stage'
-
-        # sort out input and output filenames
-        # list_of_lists_or_source_folder, output_filename_truncated, seg_from_prev_stage_files = \
-        #     self._manage_input_and_output_lists(list_of_lists_or_source_folder,
-        #                                         output_folder_or_list_of_truncated_output_files,
-        #                                         None, overwrite, 0, 1,
-        #                                         save_probabilities)
-        # if len(list_of_lists_or_source_folder) == 0:
-        #     return
 
         label_manager = self.plans_manager.get_label_manager(self.dataset_json)
         preprocessor = self.configuration_manager.preprocessor_class(verbose=self.verbose)
 
-        # if output_filename_truncated is None:
-        #     output_filename_truncated = [None] * len(list_of_lists_or_source_folder)
-        # if seg_from_prev_stage_files is None:
-        #     seg_from_prev_stage_files = [None] * len(seg_from_prev_stage_files)
-
         ret = []
-        # for li, of, sps in zip(list_of_lists_or_source_folder, output_filename_truncated, seg_from_prev_stage_files):
-        # data, seg, data_properties = preprocessor.run_case(
-        #     li,
-        #     sps,
-        #     self.plans_manager,
-        #     self.configuration_manager,
-        #     self.dataset_json
-        # )
+        
         data, seg = preprocessor.run_case_npy(data, None, data_properties, 
                                       self.plans_manager, self.configuration_manager,
                                       self.dataset_json)
@@ -904,10 +866,6 @@ class nnUNetPredictor(object):
 
         prediction = self.predict_logits_from_preprocessed_data(torch.from_numpy(data)).cpu()
 
-        # if of is not None:
-        #     export_prediction_from_logits(prediction, data_properties, self.configuration_manager, self.plans_manager,
-        #         self.dataset_json, of, save_probabilities)
-        # else:
         ret.append(convert_predicted_logits_to_segmentation_with_correct_shape(prediction, self.plans_manager,
                 self.configuration_manager, self.label_manager,
                 data_properties,
@@ -919,6 +877,129 @@ class nnUNetPredictor(object):
         empty_cache(self.device)
         return ret
 
+
+def window_transform_2d(dcm_2d_array, window_width, window_center, normal=False):
+    """
+    window_width: 窗位
+    window_center: 窗宽
+    """
+    min_window = float(window_center) - 0.5 * float(window_width)
+    new_2d_array = (dcm_2d_array - min_window) / float(window_width)
+    new_2d_array[new_2d_array < 0] = 0
+    new_2d_array[new_2d_array > 1] = 1
+    if not normal:
+        new_2d_array = (new_2d_array * 255).astype('uint8')
+    return new_2d_array
+
+def window_transform_3d(dcm_3d_array, window_width, window_center, low_slice_num=0, high_slice_num=0, normal=False) :
+    
+    if(high_slice_num == 0):
+        high_slice_num = len(dcm_3d_array)
+    
+    for slice_num in range(low_slice_num, high_slice_num):
+        dcm_3d_array[slice_num] = window_transform_2d(dcm_3d_array[slice_num], window_width, window_center, normal)
+
+    return dcm_3d_array
+
+
+def harris_corner_detection(img, gamma):
+    # print(gamma)
+    img = img.astype("uint8")
+    img = np.float32(img)
+    width, height = img.shape
+    
+    Harris_detector = cv2.cornerHarris(img, 2, 3, 0.04)
+
+    dst = Harris_detector
+    thres = gamma * dst.max()
+    # print('thres =', thres)
+    gray_img = deepcopy(img)
+    gray_img[dst <= thres] = 0
+    gray_img[dst > thres] = 255
+    gray_img = gray_img.astype("uint8")
+
+    coor = np.array([])
+    for i in range(width):
+        for j in range(height):
+            if gray_img[i][j] == 255: 
+                coor = np.append(coor, [i, j], axis=0) 
+    coor = np.reshape(coor, (-1, 2))
+    return gray_img, coor
+
+def get_cross_section(dicom) :
+    dcm_3d_array = window_transform_3d(dicom, window_width=1700, window_center=1500).astype(np.uint8)
+
+    # Maximum Intensity Projection
+    mip_img = np.max(dcm_3d_array, axis=2)
+    mip_img[mip_img != 255] = 0
+
+    # open and close
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    mip_img = cv2.morphologyEx(mip_img, cv2.MORPH_OPEN, kernel, iterations=1)
+    mip_img = cv2.morphologyEx(mip_img, cv2.MORPH_CLOSE, kernel, iterations=1)
+    
+    # get roi slice base on corner detection
+    y_coords = np.where(mip_img == 255)[0]
+    y_coords = y_coords[(y_coords > 50) & (y_coords < 300)]
+    average_y = np.mean(y_coords)
+
+    bi_img, coordinates = harris_corner_detection(mip_img, gamma=0.25) 
+    index = np.argsort(coordinates[:, 1]) 
+    coordinates = coordinates[index] 
+    del_idx = np.array([], dtype=np.int16)
+    for i in range(coordinates.shape[0]):
+        x = int(coordinates[i, 0])
+        y = int(coordinates[i, 1])
+        if np.count_nonzero(mip_img[x-1, (y-1):(y+2)]) >= 2 or x >= 250 or x < 50:
+            del_idx = np.append(del_idx, int(i))
+    
+    coordinates = np.delete(coordinates, del_idx, axis=0) 
+    coordinates = coordinates.astype(int)
+    ori_coordinates = coordinates
+    
+    # find anomalies
+    coordinates_x = coordinates[:, 1]
+    coordinates_y = coordinates[:, 0]
+    data_std = np.std(coordinates_y)
+    data_mean = np.mean(coordinates_y)
+    anomaly = data_std * 3
+
+    coordinates = []
+    for num in coordinates_y:
+        if num <= data_mean + anomaly and num >= data_mean - anomaly :
+            coordinates.append(num)
+
+    cs_upper, cs_lower = np.min(coordinates), np.max(coordinates)
+    cs_front, cs_rear = np.min(coordinates_x), np.max(coordinates_x)
+    # cs_y = int(np.mean(coordinates))
+    cs_y = int(average_y)
+    # get roi slice base on corner detection
+    x_coords = np.where(mip_img == 255)[1]
+    # cs_x = int(np.mean(coordinates_x))
+    cs_front = int(np.min(x_coords))
+    
+    cs_front -= 16
+    if cs_front < 0 :
+        cs_front = 0
+    cs_rear = cs_front + 192
+    
+    cs_upper = cs_y - 96
+    cs_lower = cs_y + 96
+    
+    dcm_3d_array = dcm_3d_array[cs_upper:cs_lower, cs_front:cs_rear, :]
+    
+    # Maximum Intensity Projection
+    mip_img = np.max(dcm_3d_array, axis=1)
+    mip_img[mip_img != 255] = 0
+    
+    teeth_area = np.max(mip_img, axis=0)
+    non_zero_area = np.where(teeth_area != 0)[0]
+    teeth_min, teeth_max = non_zero_area.min(), non_zero_area.max()
+    
+    cs_left = (teeth_min + teeth_max) // 2 - 108
+    cs_right = (teeth_min + teeth_max) // 2 + 108
+        
+    return cs_upper, cs_lower, cs_front, cs_rear, cs_left, cs_right
 
 
 #
@@ -941,24 +1022,27 @@ class ImplantGenerator(ScriptedLoadableModule):
         # TODO: update with short description of the module and a link to online module documentation
         # _() function marks text as translatable to other languages
         self.parent.helpText = _("""
-This is an example of scripted loadable module bundled in an extension.
-See more information in <a href="https://github.com/organization/projectname#Generator">module documentation</a>.
-""")
+            This is an example of scripted loadable module bundled in an extension.
+            See more information in <a href="https://github.com/organization/projectname#Generator">module documentation</a>.
+            """)
         # TODO: replace with organization, grant and thanks
         self.parent.acknowledgementText = _("""
-This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc., Andras Lasso, PerkLab,
-and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR013218-12S1.
-""")
+            This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc., Andras Lasso, PerkLab,
+            and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR013218-12S1.
+            """)
 
         # Additional initialization step after application startup is complete
         slicer.app.connect("startupCompleted()", registerSampleData)
         
         print(
-        "\n#######################################################################\nPlease cite the following paper "
-        "when using nnU-Net:\n"
+        "\n#######################################################################\nPlease cite the following papers "
+        "when using Implant Generator:\n"
         "Isensee, F., Jaeger, P. F., Kohl, S. A., Petersen, J., & Maier-Hein, K. H. (2021). "
         "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation. "
-        "Nature methods, 18(2), 203-211.\n#######################################################################\n")
+        "Nature methods, 18(2), 203-211.\n "
+        "Beichen, Wen et al. (2024). "
+        "Intelligent virtual dental implant placement via 3D segmentation strategy"
+        "xx, xx\n#######################################################################\n")
 
 
 #
@@ -1210,26 +1294,12 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         startTime = time.time()
         logging.info("Processing started")
 
-        # Compute the thresholded output volume using the "Threshold Scalar Volume" CLI module
-        # cliParams = {
-        #     "InputVolume": inputVolume.GetID(),
-        #     "OutputVolume": outputVolume.GetID(),
-        #     "ThresholdValue": imageThreshold,
-        #     "ThresholdType": "Above" if invert else "Below",
-        # }
-        
-        # input = "./dataset/raw"
-        # output = "./dataset/predict"
-        device = "cpu"
-        # spacing = 1.0
-        
-        # input_images = [item.path for item in os.scandir(input) if item.is_file()]
+        if torch.cuda.is_available() :
+            device = "cuda"
+        else :
+            device = "cpu"
+        spacing = 1.0
 
-        # if not isdir(output):
-        #     maybe_mkdir_p(output)
-
-        assert device in ['cpu', 'cuda',
-                            'mps'], f'-device must be either cpu, mps or cuda. Other devices are not tested/supported. Got: {args.device}.'
         if device == 'cpu':
             # let's allow torch to use hella threads
             import multiprocessing
@@ -1243,8 +1313,10 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         else:
             device = torch.device('mps')
         # print(device)
-
-        predictor = nnUNetPredictor(tile_step_size=0.5,
+        
+        # implant locator process
+        #########################
+        predictor_loc = nnUNetPredictor(tile_step_size=0.5,
                                     use_gaussian=True,
                                     use_mirroring=True,
                                     perform_everything_on_device=True,
@@ -1252,10 +1324,8 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
                                     verbose=False,
                                     verbose_preprocessing=False,
                                     allow_tqdm=False)
-        predictor.initialize_from_trained_model_folder('checkpoint_final.pth')
+        predictor_loc.initialize_from_trained_model_folder("Locator", 'checkpoint_locator.pth')
         # predictor.predict_from_files_sequential(input, output, False, overwrite=True)
-    
-        # image_name = os.path.split(input_image)[-1].split('.')[0]
         
         images = []
         spacings = []
@@ -1263,9 +1333,15 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         directions = []
         spacings_for_nnunet = []
         
-        # itk_image = sitk.ReadImage(input_image)
         itk_array = slicer.util.arrayFromVolume(inputVolume)
-        itk_image = sitk.GetImageFromArray(itk_array)
+        dicom = deepcopy(itk_array)
+        cs_upper, cs_lower, cs_front, cs_rear, cs_left, cs_right = get_cross_section(dicom)
+        dicom = deepcopy(itk_array)
+        dicom = window_transform_3d(dicom, window_width=4000, window_center=1000).astype(np.uint8)
+        dicom_part = dicom[cs_upper:cs_lower, cs_front:cs_rear, cs_left:cs_right]
+        dicom_part = rescale(dicom_part, 0.5, order=1, preserve_range=True)
+        
+        itk_image = sitk.GetImageFromArray(dicom_part)
         spacings.append(itk_image.GetSpacing())
         origins.append(itk_image.GetOrigin())
         directions.append(itk_image.GetDirection())
@@ -1302,27 +1378,113 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         }
         data, data_properties = np.vstack(images, dtype=np.float32, casting='unsafe'), dict
         
-        predict = predictor.my_predict(data, data_properties, False, True)[0] * 255
+        predict = predictor_loc.my_predict(data, data_properties, False, True)[0]
         
-        # print(np.max(predict), np.min(predict), predict.dtype)
-        # predict = sitk.GetImageFromArray(predict[0])
-        # sitk.WriteImage(predict, f"{output}/{image_name}.nii.gz")
-        spacing = [1.0, 1.0, 1.0]  # 设置体素大小 (X, Y, Z)
-        origin = [0.0, 0.0, 0.0]   # 设置体积起点位置 (R, A, S)
-        dimensions = predict.shape[::-1]  # 转换为 (X, Y, Z) 顺序
-        scalar_type = vtk.VTK_INT  # 根据数组类型设置合适的标量类型
+        # get central position of cylinder
+        cylinder = np.array(np.where(predict == 1))
+        midx = np.min(cylinder[0]) + np.max(cylinder[0]) + cs_upper
+        midy = np.min(cylinder[1]) + np.max(cylinder[1]) + cs_front
+        midz = np.min(cylinder[2]) + np.max(cylinder[2]) + cs_left
+        dicom = deepcopy(itk_array)
+        dicom = window_transform_3d(dicom, window_width=4000, window_center=1000).astype(np.uint8)
+        dicom = dicom[midx-48:midx+48, midy-48:midy+48, midz-48:midz+48]
+        
+        # implant generator process
+        ###########################
 
-        # 配置 ImageData 和几何信息
-        image_data = slicer.vtkOrientedImageData()
-        image_data.SetDimensions(dimensions)
-        image_data.AllocateScalars(scalar_type, 1)
-        outputVolume.SetAndObserveImageData(image_data)
-        outputVolume.SetSpacing(spacing)
-        outputVolume.SetOrigin(origin)
+        predictor_gen = nnUNetPredictor(tile_step_size=0.5,
+                                    use_gaussian=True,
+                                    use_mirroring=True,
+                                    perform_everything_on_device=True,
+                                    device=device,
+                                    verbose=False,
+                                    verbose_preprocessing=False,
+                                    allow_tqdm=False)
+        predictor_gen.initialize_from_trained_model_folder("Generator", 'checkpoint_generator.pth')
+        # predictor.predict_from_files_sequential(input, output, False, overwrite=True)
+        
+        images = []
+        spacings = []
+        origins = []
+        directions = []
+        spacings_for_nnunet = []
+        
+        # itk_image = sitk.ReadImage(input_image
+        # itk_array = slicer.util.arrayFromVolume(inputVolume)
+        itk_image = sitk.GetImageFromArray(dicom)
+        spacings.append(itk_image.GetSpacing())
+        origins.append(itk_image.GetOrigin())
+        directions.append(itk_image.GetDirection())
+        npy_image = sitk.GetArrayFromImage(itk_image)
+        if npy_image.ndim == 2:
+            # 2d
+            npy_image = npy_image[None, None]
+            max_spacing = max(spacings[-1])
+            spacings_for_nnunet.append((max_spacing * 999, *list(spacings[-1])[::-1]))
+        elif npy_image.ndim == 3:
+            # 3d, as in original nnunet
+            npy_image = npy_image[None]
+            spacings_for_nnunet.append(list(spacings[-1])[::-1])
+        elif npy_image.ndim == 4:
+            # 4d, multiple modalities in one file
+            spacings_for_nnunet.append(list(spacings[-1])[::-1][1:])
+            pass
+        else:
+            raise RuntimeError(f"Unexpected number of dimensions: {npy_image.ndim} in file {f}")
 
-        # 将 NumPy 数组拷贝到 Volume 节点
+        images.append(npy_image)
+        spacings_for_nnunet[-1] = list(np.abs(spacings_for_nnunet[-1]))
+
+        dict = {
+            'sitk_stuff': {
+                # this saves the sitk geometry information. This part is NOT used by nnU-Net!
+                'spacing': spacings[0],
+                'origin': origins[0],
+                'direction': directions[0]
+            },
+            # the spacing is inverted with [::-1] because sitk returns the spacing in the wrong order lol. Image arrays
+            # are returned x,y,z but spacing is returned z,y,x. Duh.
+            'spacing': spacings_for_nnunet[0]
+        }
+        data, data_properties = np.vstack(images, dtype=np.float32, casting='unsafe'), dict
+        
+        predict = predictor_gen.my_predict(data, data_properties, False, True)[0]
+        
+        outputVolume = slicer.modules.volumes.logic().CloneVolume(slicer.mrmlScene, inputVolume, "outputVolume")
+        # slicer.util.setSliceViewerLayers(background=outputVolume)
+
+        
+        # spacing = [1.0, 1.0, 1.0]
+        # origin = [0.0, 0.0, 0.0]   # 设置体积起点位置 (R, A, S)
+        # dimensions = predict.shape[::-1]  # 转换为 (X, Y, Z) 顺序
+        # scalar_type = vtk.VTK_INT
+
+        # image_data = slicer.vtkOrientedImageData()
+        # image_data.SetDimensions(dimensions)
+        # image_data.AllocateScalars(scalar_type, 1)
+        # outputVolume.SetAndObserveImageData(image_data)
+        # outputVolume.SetSpacing(spacing)
+        # outputVolume.SetOrigin(origin)
+        
+        # outputVolume.SetSpacing(inputVolume.GetSpacing())
+        # outputVolume.SetOrigin(inputVolume.GetOrigin())
+        # # outputVolume.SetIJKToRASMatrix(inputVolume.GetIJKToRASMatrix())
+        # image_data = vtk.vtkImageData()
+        # image_data.SetDimensions(inputVolume.shape[::-1])
+        # image_data.AllocateScalars(vtk.VTK_FLOAT, 1)
+        # outputVolume.SetAndObserveImageData(image_data)
         outputArray = slicer.util.arrayFromVolume(outputVolume)
-        np.copyto(outputArray, predict)
+        max_dicom = np.max(outputArray)
+        predict = np.array(np.where(predict == 1))
+        # print(predict.shape)
+        predict[0] += (midx - 48)
+        predict[1] += (midy - 48)
+        predict[2] += (midz - 48)
+        predict = predict.T
+        # print(predict)
+        for p in predict :
+            outputArray[p[0]][p[1]][p[2]] = max_dicom
+        # np.copyto(outputArray, itk_array)
 
         # Notify Slicer that the volume has been updated
         slicer.util.arrayFromVolumeModified(outputVolume)
