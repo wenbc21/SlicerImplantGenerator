@@ -1388,6 +1388,21 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         dicom = deepcopy(itk_array)
         dicom = window_transform_3d(dicom, window_width=4000, window_center=1000).astype(np.uint8)
         dicom = dicom[midx-48:midx+48, midy-48:midy+48, midz-48:midz+48]
+
+        # Create a new ROI 
+        def convertIJKToRAS(volumeNode, ijk_coords):
+            ijkToRasMatrix = vtk.vtkMatrix4x4()
+            volumeNode.GetIJKToRASMatrix(ijkToRasMatrix)
+            ijk_coords_hom = np.array([*ijk_coords, 1])  # 扩展为齐次坐标 (i, j, k, 1)
+            ras_coords_hom = np.dot(np.array([ijkToRasMatrix.GetElement(i, j) for i in range(4) for j in range(4)]).reshape(4, 4), ijk_coords_hom)
+            return tuple(ras_coords_hom[:3])  # 取前三个值作为 RAS 坐标
+
+        roiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", "Missing Region")
+        roiNode.SetCenter(convertIJKToRAS(inputVolume, (midz, midy, midx)))
+        roiNode.SetSize((96*0.3, 96*0.3, 96*0.3))
+        roiNode.SetDisplayVisibility(True)
+        slicer.modules.markups.logic().JumpSlicesToNthPointInMarkup(roiNode.GetID(), 0, True)
+        
         
         # implant generator process
         ###########################
@@ -1491,7 +1506,8 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         
         # Show the result in the 3D Slicer scene
         slicer.util.setSliceViewerLayers(background=outputVolume, foreground=inputVolume, foregroundOpacity=0.0)
-        
+
+        slicer.modules.markups.logic().JumpSlicesToNthPointInMarkup(roiNode.GetID(), 0, True)
         
         # cliNode = slicer.cli.run(slicer.modules.thresholdscalarvolume, None, cliParams, wait_for_completion=True, update_display=showResult)
         # # We don't need the CLI module node anymore, remove it to not clutter the scene with it
