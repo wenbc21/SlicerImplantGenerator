@@ -29,6 +29,9 @@ import importlib
 import pkgutil
 import SimpleITK as sitk
 
+os.environ["PATH"] += ";C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1/bin"
+os.environ["CUDA_HOME"] = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1"
+
 import numpy as np
 try:
   import cv2
@@ -43,6 +46,8 @@ except ModuleNotFoundError:
     slicer.util.pip_install("torch==2.4.0")
     import torch
 # torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+# torch.cuda.is_available()
+# slicer.util.pip_install("C:/Users/WenBC/Desktop/SlicerImplantGenerator/ImplantGenerator/ImplantGenerator/Resources/torch-2.4.0+cu121-cp39-cp39-win_amd64.whl")
 try:
   from acvl_utils.cropping_and_padding.padding import pad_nd_image
 except ModuleNotFoundError:
@@ -878,26 +883,17 @@ class nnUNetPredictor(object):
         return ret
 
 
-def window_transform_2d(dcm_2d_array, window_width, window_center, normal=False):
-    """
-    window_width: 窗位
-    window_center: 窗宽
-    """
+def window_transform_3d(dcm_3d_array, window_width, window_center, normal=False) :
+    
     min_window = float(window_center) - 0.5 * float(window_width)
-    new_2d_array = (dcm_2d_array - min_window) / float(window_width)
-    new_2d_array[new_2d_array < 0] = 0
-    new_2d_array[new_2d_array > 1] = 1
+    dcm_3d_array = dcm_3d_array.astype(np.float32)
+    dcm_3d_array = (dcm_3d_array - min_window) / float(window_width)
+    
+    dcm_3d_array[dcm_3d_array < 0] = 0
+    dcm_3d_array[dcm_3d_array > 1] = 1
+    
     if not normal:
-        new_2d_array = (new_2d_array * 255).astype('uint8')
-    return new_2d_array
-
-def window_transform_3d(dcm_3d_array, window_width, window_center, low_slice_num=0, high_slice_num=0, normal=False) :
-    
-    if(high_slice_num == 0):
-        high_slice_num = len(dcm_3d_array)
-    
-    for slice_num in range(low_slice_num, high_slice_num):
-        dcm_3d_array[slice_num] = window_transform_2d(dcm_3d_array[slice_num], window_width, window_center, normal)
+        dcm_3d_array = dcm_3d_array * 255
 
     return dcm_3d_array
 
@@ -1114,9 +1110,9 @@ class ImplantGeneratorParameterNode:
 
     inputVolume: vtkMRMLScalarVolumeNode
     imageThreshold: Annotated[float, WithinRange(-100, 500)] = 100
-    invertThreshold: bool = False
-    thresholdedVolume: vtkMRMLScalarVolumeNode
-    invertedVolume: vtkMRMLScalarVolumeNode
+    # invertThreshold: bool = False
+    # thresholdedVolume: vtkMRMLScalarVolumeNode
+    # invertedVolume: vtkMRMLScalarVolumeNode
 
 
 #
@@ -1227,25 +1223,24 @@ class ImplantGeneratorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._checkCanApply()
 
     def _checkCanApply(self, caller=None, event=None) -> None:
-        if self._parameterNode and self._parameterNode.inputVolume and self._parameterNode.thresholdedVolume:
+        if self._parameterNode and self._parameterNode.inputVolume :
             self.ui.applyButton.toolTip = _("Compute output volume")
             self.ui.applyButton.enabled = True
         else:
-            self.ui.applyButton.toolTip = _("Select input and output volume nodes")
+            self.ui.applyButton.toolTip = _("Select input volume nodes")
             self.ui.applyButton.enabled = False
 
     def onApplyButton(self) -> None:
         """Run processing when user clicks "Apply" button."""
         with slicer.util.tryWithErrorDisplay(_("Failed to compute results."), waitCursor=True):
             # Compute output
-            self.logic.process(self.ui.inputSelector.currentNode(), self.ui.outputSelector.currentNode(),
-                               self.ui.imageThresholdSliderWidget.value, self.ui.invertOutputCheckBox.checked)
+            self.logic.process(self.ui.inputSelector.currentNode(), self.ui.imageThresholdSliderWidget.value)
 
-            # Compute inverted output (if needed)
-            if self.ui.invertedOutputSelector.currentNode():
-                # If additional output volume is selected then result with inverted threshold is written there
-                self.logic.process(self.ui.inputSelector.currentNode(), self.ui.invertedOutputSelector.currentNode(),
-                                   self.ui.imageThresholdSliderWidget.value, not self.ui.invertOutputCheckBox.checked, showResult=False)
+            # # Compute inverted output (if needed)
+            # if self.ui.invertedOutputSelector.currentNode():
+            #     # If additional output volume is selected then result with inverted threshold is written there
+            #     self.logic.process(self.ui.inputSelector.currentNode(), self.ui.invertedOutputSelector.currentNode(),
+            #                        self.ui.imageThresholdSliderWidget.value, not self.ui.invertOutputCheckBox.checked, showResult=False)
 
 
 #
@@ -1272,10 +1267,7 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
 
     def process(self,
                 inputVolume: vtkMRMLScalarVolumeNode,
-                outputVolume: vtkMRMLScalarVolumeNode,
-                imageThreshold: float,
-                invert: bool = False,
-                showResult: bool = True) -> None:
+                imageThreshold: float) -> None:
         """
         Run the processing algorithm.
         Can be used without GUI widget.
@@ -1286,8 +1278,8 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         :param showResult: show output volume in slice viewers
         """
 
-        if not inputVolume or not outputVolume:
-            raise ValueError("Input or output volume is invalid")
+        if not inputVolume :
+            raise ValueError("Input volume is invalid")
 
         import time
 
@@ -1298,7 +1290,6 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
             device = "cuda"
         else :
             device = "cpu"
-        spacing = 1.0
 
         if device == 'cpu':
             # let's allow torch to use hella threads
@@ -1325,7 +1316,6 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
                                     verbose_preprocessing=False,
                                     allow_tqdm=False)
         predictor_loc.initialize_from_trained_model_folder("Locator", 'checkpoint_locator.pth')
-        # predictor.predict_from_files_sequential(input, output, False, overwrite=True)
         
         images = []
         spacings = []
@@ -1346,21 +1336,13 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         origins.append(itk_image.GetOrigin())
         directions.append(itk_image.GetDirection())
         npy_image = sitk.GetArrayFromImage(itk_image)
-        if npy_image.ndim == 2:
-            # 2d
-            npy_image = npy_image[None, None]
-            max_spacing = max(spacings[-1])
-            spacings_for_nnunet.append((max_spacing * 999, *list(spacings[-1])[::-1]))
-        elif npy_image.ndim == 3:
+        
+        if npy_image.ndim != 3:
+            raise RuntimeError(f"Unexpected number of dimensions: {npy_image.ndim}")
+        else :
             # 3d, as in original nnunet
             npy_image = npy_image[None]
             spacings_for_nnunet.append(list(spacings[-1])[::-1])
-        elif npy_image.ndim == 4:
-            # 4d, multiple modalities in one file
-            spacings_for_nnunet.append(list(spacings[-1])[::-1][1:])
-            pass
-        else:
-            raise RuntimeError(f"Unexpected number of dimensions: {npy_image.ndim} in file {f}")
 
         images.append(npy_image)
         spacings_for_nnunet[-1] = list(np.abs(spacings_for_nnunet[-1]))
@@ -1385,9 +1367,7 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         midx = np.min(cylinder[0]) + np.max(cylinder[0]) + cs_upper
         midy = np.min(cylinder[1]) + np.max(cylinder[1]) + cs_front
         midz = np.min(cylinder[2]) + np.max(cylinder[2]) + cs_left
-        dicom = deepcopy(itk_array)
-        dicom = window_transform_3d(dicom, window_width=4000, window_center=1000).astype(np.uint8)
-        dicom = dicom[midx-48:midx+48, midy-48:midy+48, midz-48:midz+48]
+        dicom_part = dicom[midx-48:midx+48, midy-48:midy+48, midz-48:midz+48]
 
         # Create a new ROI 
         def convertIJKToRAS(volumeNode, ijk_coords):
@@ -1401,8 +1381,9 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         roiNode.SetCenter(convertIJKToRAS(inputVolume, (midz, midy, midx)))
         roiNode.SetSize((96*0.3, 96*0.3, 96*0.3))
         roiNode.SetDisplayVisibility(True)
+        roiNode.GetDisplayNode().SetOpacity(0.6)
+        # roiNode.GetDisplayNode().SetCurrentInteractionMode(1)
         slicer.modules.markups.logic().JumpSlicesToNthPointInMarkup(roiNode.GetID(), 0, True)
-        
         
         # implant generator process
         ###########################
@@ -1416,7 +1397,6 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
                                     verbose_preprocessing=False,
                                     allow_tqdm=False)
         predictor_gen.initialize_from_trained_model_folder("Generator", 'checkpoint_generator.pth')
-        # predictor.predict_from_files_sequential(input, output, False, overwrite=True)
         
         images = []
         spacings = []
@@ -1424,28 +1404,17 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         directions = []
         spacings_for_nnunet = []
         
-        # itk_image = sitk.ReadImage(input_image
-        # itk_array = slicer.util.arrayFromVolume(inputVolume)
-        itk_image = sitk.GetImageFromArray(dicom)
+        itk_image = sitk.GetImageFromArray(dicom_part)
         spacings.append(itk_image.GetSpacing())
         origins.append(itk_image.GetOrigin())
         directions.append(itk_image.GetDirection())
         npy_image = sitk.GetArrayFromImage(itk_image)
-        if npy_image.ndim == 2:
-            # 2d
-            npy_image = npy_image[None, None]
-            max_spacing = max(spacings[-1])
-            spacings_for_nnunet.append((max_spacing * 999, *list(spacings[-1])[::-1]))
-        elif npy_image.ndim == 3:
+        if npy_image.ndim != 3:
+            raise RuntimeError(f"Unexpected number of dimensions: {npy_image.ndim}")
+        else :
             # 3d, as in original nnunet
             npy_image = npy_image[None]
             spacings_for_nnunet.append(list(spacings[-1])[::-1])
-        elif npy_image.ndim == 4:
-            # 4d, multiple modalities in one file
-            spacings_for_nnunet.append(list(spacings[-1])[::-1][1:])
-            pass
-        else:
-            raise RuntimeError(f"Unexpected number of dimensions: {npy_image.ndim} in file {f}")
 
         images.append(npy_image)
         spacings_for_nnunet[-1] = list(np.abs(spacings_for_nnunet[-1]))
@@ -1468,26 +1437,6 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         outputVolume = slicer.modules.volumes.logic().CloneVolume(slicer.mrmlScene, inputVolume, "outputVolume")
         # slicer.util.setSliceViewerLayers(background=outputVolume)
 
-        
-        # spacing = [1.0, 1.0, 1.0]
-        # origin = [0.0, 0.0, 0.0]   # 设置体积起点位置 (R, A, S)
-        # dimensions = predict.shape[::-1]  # 转换为 (X, Y, Z) 顺序
-        # scalar_type = vtk.VTK_INT
-
-        # image_data = slicer.vtkOrientedImageData()
-        # image_data.SetDimensions(dimensions)
-        # image_data.AllocateScalars(scalar_type, 1)
-        # outputVolume.SetAndObserveImageData(image_data)
-        # outputVolume.SetSpacing(spacing)
-        # outputVolume.SetOrigin(origin)
-        
-        # outputVolume.SetSpacing(inputVolume.GetSpacing())
-        # outputVolume.SetOrigin(inputVolume.GetOrigin())
-        # # outputVolume.SetIJKToRASMatrix(inputVolume.GetIJKToRASMatrix())
-        # image_data = vtk.vtkImageData()
-        # image_data.SetDimensions(inputVolume.shape[::-1])
-        # image_data.AllocateScalars(vtk.VTK_FLOAT, 1)
-        # outputVolume.SetAndObserveImageData(image_data)
         outputArray = slicer.util.arrayFromVolume(outputVolume)
         max_dicom = np.max(outputArray)
         predict = np.array(np.where(predict == 1))
@@ -1508,13 +1457,10 @@ class ImplantGeneratorLogic(ScriptedLoadableModuleLogic):
         slicer.util.setSliceViewerLayers(background=outputVolume, foreground=inputVolume, foregroundOpacity=0.0)
 
         slicer.modules.markups.logic().JumpSlicesToNthPointInMarkup(roiNode.GetID(), 0, True)
-        
-        # cliNode = slicer.cli.run(slicer.modules.thresholdscalarvolume, None, cliParams, wait_for_completion=True, update_display=showResult)
-        # # We don't need the CLI module node anymore, remove it to not clutter the scene with it
-        # slicer.mrmlScene.RemoveNode(cliNode)
 
         stopTime = time.time()
         logging.info(f"Processing completed in {stopTime-startTime:.2f} seconds")
+        print(f"Processing completed in {stopTime-startTime:.2f} seconds")
 
 
 #
